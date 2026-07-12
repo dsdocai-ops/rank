@@ -1,2 +1,2 @@
-streamlit
-moviepy
+streamlit>=1.32
+moviepy>=2.0

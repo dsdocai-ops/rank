@@ -1,120 +1,267 @@
-import streamlit as st
+"""Mobile Video Ranker — 9:16 ranking-countdown video generator.
+
+Layout
+------
++------------------------------+
+|        HEADER (title)        |  <- constant text overlay at the top
++---------+--------------------+
+| 01 Word |                    |
+| 02 Word |    active clip     |  <- clips play sequentially, centred
+| ...     |   (fit to stage)   |     in the stage area
++---------+--------------------+
+
+Behaviour
+---------
+* A constant background layer runs for the whole video.
+* Each sidebar entry ("01 Word") pops in at 100% opacity on the exact
+  frame its clip starts, and drops to a translucent state the moment
+  the clip ends (it never fully disappears).
+* Audio stays in sync because every layer's start time is derived from
+  the same cumulative sum of source-clip durations.
+
+Requires moviepy >= 2.0 (Pillow-based TextClip, no ImageMagick needed).
+"""
+
 import os
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+import tempfile
 
-st.set_page_config(page_title="Video Ranker", layout="centered")
-st.title("🎬 Mobile Video Ranker")
-st.write("Upload 6 clips, add your labels, and render your ranking video directly.")
+import streamlit as st
+from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
 
-# 1. Inputs for Title and Words
-ranking_title = st.text_input("Ranking Title", value="My Ranking")
+# ======================================================================
+# CONFIGURATION — edit this block to reuse the script as a template
+# ======================================================================
 
-st.write("### Enter Descriptions (Clips will play from 6 down to 1)")
-words = []
-for i in range(6, 0, -1):
-    word = st.text_input(f"1-Word Description for Rank {i}", value=f"Label{i}", key=f"word_{i}")
-    words.append(word) # Ordered [Word6, Word5, Word4, Word3, Word2, Word1]
+# Canvas (9:16 vertical)
+VIDEO_WIDTH = 1080
+VIDEO_HEIGHT = 1920
+BACKGROUND_COLOR = (0, 0, 0)          # constant background layer (RGB)
 
-# 2. File Uploaders
-st.write("### Upload Video Clips")
-uploaded_files = []
-for i in range(6, 0, -1):
-    f = st.file_uploader(f"Upload Clip for Rank {i}", type=["mp4", "mov", "avi"], key=f"file_{i}")
-    uploaded_files.append(f)
+# Regions
+HEADER_HEIGHT = 200                   # top strip reserved for the title
+SIDEBAR_WIDTH = 320                   # left strip reserved for numbering
+ROW_HEIGHT = 160                      # vertical spacing between entries
+ROW_TOP_PADDING = 60                  # offset of first row below header
+ROW_LEFT_PADDING = 20                 # x offset of sidebar text
 
-# 3. Execution Render Logic
-if st.button("🚀 Render Layout & Video"):
-    # Check if all files are uploaded
-    if any(f is None for f in uploaded_files):
-        st.error("Please upload all 6 video clips before rendering.")
-    else:
-        with st.spinner("Processing video... This may take a minute depending on clip sizes."):
-            try:
-                # Save uploaded files temporarily
-                temp_paths = []
-                for idx, f in enumerate(uploaded_files):
-                    path = f"temp_rank_{6-idx}.mp4"
-                    with open(path, "wb") as buffer:
-                        buffer.write(f.read())
-                    temp_paths.append(path)
+# Clips & ordering
+CLIP_COUNT = 6
+PLAYBACK_ORDER = [6, 5, 4, 3, 2, 1]   # ranks in the order their clips play
+SIDEBAR_ORDER = [1, 2, 3, 4, 5, 6]    # ranks top-to-bottom in the sidebar
 
-                # Layout Variables
-                sidebar_order = [1, 2, 3, 6, 4, 5]
-                width, height = 1080, 1920
-                header_height = 200
-                sidebar_width = 320
-                
-                # Load video clips and determine total duration
-                clips_objects = []
-                total_duration = 0
-                for p in temp_paths:
-                    clip = VideoFileClip(p).resize(width=width - sidebar_width)
-                    clips_objects.append(clip)
-                    total_duration += clip.duration
+# Opacity states
+ACTIVE_OPACITY = 1.0                  # while an entry's clip is playing
+FINISHED_OPACITY = 0.4                # after the entry's clip has ended
 
-                # Header construction
-                header_bg = TextClip("", size=(width, header_height), bg_color='black')
-                header_text = TextClip(f"Ranking: {ranking_title}", fontsize=52, color='white', font='Arial-Bold')
-                header_text = header_text.set_position(('center', 'center'))
-                header = CompositeVideoClip([header_bg, header_text]).set_duration(total_duration)
+# Text styling
+TITLE_FONT_SIZE = 52
+LABEL_FONT_SIZE = 42
+TEXT_COLOR = "white"
+TEXT_MARGIN = 20                      # padding so descenders aren't clipped
+FONT_CANDIDATES = [                   # first existing path wins
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+]
 
-                sidebar_clips = []
-                processed_clips = []
-                running_time = 0
+# Output
+OUTPUT_FPS = 30
+OUTPUT_CODEC = "libx264"
+OUTPUT_AUDIO_CODEC = "aac"
+OUTPUT_PRESET = "medium"              # x264 speed/size trade-off
+DOWNLOAD_FILENAME = "my_ranking_video.mp4"
 
-                # Process clips from 6 down to 1
-                for i in range(6):
-                    clip = clips_objects[i]
-                    word = words[i]
-                    clip_dur = clip.duration
-                    current_rank_num = 6 - i
-                    
-                    # Compute vertical position based on exact requested list layout (1,2,3,6,4,5)
-                    vertical_index = sidebar_order.index(current_rank_num)
-                    y_pos = header_height + (vertical_index * 160) + 60
-                    
-                    # Active text state (100% visible while clip plays)
-                    active_txt = TextClip(f"{current_rank_num}. {word}", fontsize=42, color='white', font='Arial-Bold')
-                    active_txt = active_txt.set_position((20, y_pos)).set_start(running_time).set_duration(clip_dur)
-                    sidebar_clips.append(active_txt)
-                    
-                    # Translucent text state (40% visible after clip finishes)
-                    if (running_time + clip_dur) < total_duration:
-                        done_dur = total_duration - (running_time + clip_dur)
-                        done_txt = TextClip(f"{current_rank_num}. {word}", fontsize=42, color='white', font='Arial-Bold')
-                        done_txt = done_txt.set_position((20, y_pos)).set_opacity(0.4).set_start(running_time + clip_dur).set_duration(done_dur)
-                        sidebar_clips.append(done_txt)
-                    
-                    # Position video next to sidebar
-                    playing_clip = clip.set_start(running_time).set_position((sidebar_width, header_height))
-                    processed_clips.append(playing_clip)
-                    
-                    running_time += clip_dur
+# ======================================================================
+# RENDERING
+# ======================================================================
 
-                # Assemble final master file
-                bg_canvas = TextClip("", size=(width, height), bg_color='black').set_duration(total_duration)
-                final_video = CompositeVideoClip([bg_canvas, header] + sidebar_clips + processed_clips, size=(width, height))
-                
-                output_filename = "mobile_output.mp4"
-                final_video.write_videofile(output_filename, fps=24, codec="libx264", audio_codec="aac")
-                
-                # Close files to clean up hooks
-                for c in clips_objects:
-                    c.close()
 
-                # Present download button directly in mobile browser
-                with open(output_filename, "rb") as file:
-                    st.download_button(
-                        label="📥 Download Finished Video",
-                        data=file,
-                        file_name="my_ranking_video.mp4",
-                        mime="video/mp4"
-                    )
-                
-                # Cleanup temp files
-                for p in temp_paths:
-                    if os.path.exists(p): os.remove(p)
-                if os.path.exists(output_filename): os.remove(output_filename)
+def resolve_font() -> str:
+    """Return the first available font path from FONT_CANDIDATES."""
+    for path in FONT_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "No usable font found. Add a .ttf path to FONT_CANDIDATES."
+    )
 
-            except Exception as e:
-                st.error(f"An processing error occurred: {e}")
+
+def build_ranking_video(title: str, entries: list[dict], output_path: str) -> None:
+    """Render the composite video.
+
+    ``entries`` is a list of {"rank": int, "label": str, "path": str}
+    in playback order.
+    """
+    font = resolve_font()
+    stage_width = VIDEO_WIDTH - SIDEBAR_WIDTH
+    stage_height = VIDEO_HEIGHT - HEADER_HEIGHT
+
+    source_clips: list[VideoFileClip] = []
+    final = None
+    try:
+        for entry in entries:
+            clip = VideoFileClip(entry["path"])
+            source_clips.append(clip)
+            entry["clip"] = clip
+
+        total_duration = sum(clip.duration for clip in source_clips)
+
+        background = ColorClip(
+            size=(VIDEO_WIDTH, VIDEO_HEIGHT),
+            color=BACKGROUND_COLOR,
+            duration=total_duration,
+        )
+
+        title_clip = (
+            TextClip(font=font, text=title, font_size=TITLE_FONT_SIZE,
+                     color=TEXT_COLOR, margin=(TEXT_MARGIN, TEXT_MARGIN))
+            .with_position(("center", HEADER_HEIGHT // 2 - TITLE_FONT_SIZE // 2))
+            .with_duration(total_duration)
+        )
+
+        video_layers = []
+        label_layers = []
+        start_time = 0.0
+
+        for entry in entries:
+            clip = entry["clip"]
+            duration = clip.duration
+            end_time = start_time + duration
+
+            # Fit the clip inside the stage, preserving aspect ratio.
+            scale = min(stage_width / clip.w, stage_height / clip.h)
+            fitted = clip.resized(scale)
+            x = SIDEBAR_WIDTH + (stage_width - fitted.w) / 2
+            y = HEADER_HEIGHT + (stage_height - fitted.h) / 2
+            video_layers.append(
+                fitted.with_start(start_time).with_position((x, y))
+            )
+
+            # Sidebar entry: rendered once, reused for both opacity states.
+            row_index = SIDEBAR_ORDER.index(entry["rank"])
+            row_y = HEADER_HEIGHT + ROW_TOP_PADDING + row_index * ROW_HEIGHT
+            label = TextClip(
+                font=font,
+                text=f"{entry['rank']:02d}  {entry['label']}",
+                font_size=LABEL_FONT_SIZE,
+                color=TEXT_COLOR,
+                margin=(TEXT_MARGIN, TEXT_MARGIN),
+            ).with_position((ROW_LEFT_PADDING - TEXT_MARGIN, row_y - TEXT_MARGIN))
+
+            # Active state: pops in on the exact frame the clip starts.
+            label_layers.append(
+                label.with_opacity(ACTIVE_OPACITY)
+                .with_start(start_time)
+                .with_duration(duration)
+            )
+
+            # Finished state: translucent from the frame the clip ends
+            # until the end of the video.
+            if end_time < total_duration:
+                label_layers.append(
+                    label.with_opacity(FINISHED_OPACITY)
+                    .with_start(end_time)
+                    .with_duration(total_duration - end_time)
+                )
+
+            start_time = end_time
+
+        final = CompositeVideoClip(
+            [background, title_clip, *label_layers, *video_layers],
+            size=(VIDEO_WIDTH, VIDEO_HEIGHT),
+        ).with_duration(total_duration)
+
+        final.write_videofile(
+            output_path,
+            fps=OUTPUT_FPS,
+            codec=OUTPUT_CODEC,
+            audio_codec=OUTPUT_AUDIO_CODEC,
+            preset=OUTPUT_PRESET,
+            threads=os.cpu_count() or 2,
+        )
+    finally:
+        if final is not None:
+            final.close()
+        for clip in source_clips:
+            clip.close()
+
+
+# ======================================================================
+# STREAMLIT UI
+# ======================================================================
+
+
+def main() -> None:
+    st.set_page_config(page_title="Video Ranker", layout="centered")
+    st.title("🎬 Mobile Video Ranker")
+    st.write(
+        f"Upload {CLIP_COUNT} clips, add your labels, and render your "
+        "ranking video directly."
+    )
+
+    title = st.text_input("Ranking Title", value="My Ranking")
+
+    st.write(
+        f"### Enter Descriptions (Clips play from "
+        f"{PLAYBACK_ORDER[0]} to {PLAYBACK_ORDER[-1]})"
+    )
+    labels = {
+        rank: st.text_input(
+            f"1-Word Description for Rank {rank}",
+            value=f"Label{rank}",
+            key=f"word_{rank}",
+        )
+        for rank in PLAYBACK_ORDER
+    }
+
+    st.write("### Upload Video Clips")
+    uploads = {
+        rank: st.file_uploader(
+            f"Upload Clip for Rank {rank}",
+            type=["mp4", "mov", "avi"],
+            key=f"file_{rank}",
+        )
+        for rank in PLAYBACK_ORDER
+    }
+
+    if st.button("🚀 Render Layout & Video"):
+        if any(upload is None for upload in uploads.values()):
+            st.error(f"Please upload all {CLIP_COUNT} video clips before rendering.")
+        else:
+            with st.spinner("Rendering video… this may take a few minutes."):
+                try:
+                    with tempfile.TemporaryDirectory() as workdir:
+                        entries = []
+                        for rank in PLAYBACK_ORDER:
+                            upload = uploads[rank]
+                            extension = os.path.splitext(upload.name)[1] or ".mp4"
+                            path = os.path.join(workdir, f"rank_{rank}{extension}")
+                            with open(path, "wb") as handle:
+                                handle.write(upload.getbuffer())
+                            entries.append(
+                                {"rank": rank, "label": labels[rank], "path": path}
+                            )
+
+                        output_path = os.path.join(workdir, "output.mp4")
+                        build_ranking_video(title, entries, output_path)
+
+                        # Keep the bytes in session state so the download
+                        # button survives Streamlit reruns.
+                        with open(output_path, "rb") as handle:
+                            st.session_state["rendered_video"] = handle.read()
+                    st.success("Render complete!")
+                except Exception as error:  # surface render errors in the UI
+                    st.error(f"A processing error occurred: {error}")
+
+    if "rendered_video" in st.session_state:
+        st.download_button(
+            label="📥 Download Finished Video",
+            data=st.session_state["rendered_video"],
+            file_name=DOWNLOAD_FILENAME,
+            mime="video/mp4",
+        )
+
+
+if __name__ == "__main__":
+    main()
