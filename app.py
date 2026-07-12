@@ -3,17 +3,17 @@
 Layout
 ------
 +------------------------------+
-|        HEADER (title)        |  <- constant text overlay at the top
-+---------+--------------------+
-| 01 Word |                    |
-| 02 Word |    active clip     |  <- clips play sequentially, centred
-| ...     |   (fit to stage)   |     in the stage area
-+---------+--------------------+
+|   HEADER (title, black bg)   |  <- constant black bar above the video
++------------------------------+
+| 1. Word |                    |
+| 2. Word |  full-width clip   |  <- clips play sequentially, filling
+| ...     :  (list overlaps)   |     the width; the ranking list is
++------------------------------+     overlaid on the left edge
 
 Behaviour
 ---------
 * A constant background layer runs for the whole video.
-* Each sidebar entry ("01 Word") pops in at 100% opacity on the exact
+* Each list entry ("1. Word") pops in at 100% opacity on the exact
   frame its clip starts, and drops to a translucent state the moment
   the clip ends (it never fully disappears).
 * Audio stays in sync because every layer's start time is derived from
@@ -38,11 +38,10 @@ VIDEO_HEIGHT = 1920
 BACKGROUND_COLOR = (0, 0, 0)          # constant background layer (RGB)
 
 # Regions
-HEADER_HEIGHT = 200                   # top strip reserved for the title
-SIDEBAR_WIDTH = 320                   # left strip reserved for numbering
+HEADER_HEIGHT = 200                   # black title bar height at the top
 ROW_HEIGHT = 160                      # vertical spacing between entries
 ROW_TOP_PADDING = 60                  # offset of first row below header
-ROW_LEFT_PADDING = 20                 # x offset of sidebar text
+ROW_LEFT_PADDING = 40                 # x offset of the overlaid list
 
 # Clips & ordering
 CLIP_COUNT = 6
@@ -57,6 +56,8 @@ FINISHED_OPACITY = 0.4                # after the entry's clip has ended
 TITLE_FONT_SIZE = 52
 LABEL_FONT_SIZE = 42
 TEXT_COLOR = "white"
+LABEL_STROKE_COLOR = "black"          # outline keeps text readable on video
+LABEL_STROKE_WIDTH = 2
 TEXT_MARGIN = 20                      # padding so descenders aren't clipped
 FONT_CANDIDATES = [                   # first existing path wins
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -94,7 +95,6 @@ def build_ranking_video(title: str, entries: list[dict], output_path: str) -> No
     in playback order.
     """
     font = resolve_font()
-    stage_width = VIDEO_WIDTH - SIDEBAR_WIDTH
     stage_height = VIDEO_HEIGHT - HEADER_HEIGHT
 
     source_clips: list[VideoFileClip] = []
@@ -113,6 +113,13 @@ def build_ranking_video(title: str, entries: list[dict], output_path: str) -> No
             duration=total_duration,
         )
 
+        # Black title bar layered ABOVE the video so full-height clips
+        # slide underneath it instead of covering the title.
+        header_bar = ColorClip(
+            size=(VIDEO_WIDTH, HEADER_HEIGHT),
+            color=BACKGROUND_COLOR,
+            duration=total_duration,
+        )
         title_clip = (
             TextClip(font=font, text=title, font_size=TITLE_FONT_SIZE,
                      color=TEXT_COLOR, margin=(TEXT_MARGIN, TEXT_MARGIN))
@@ -129,23 +136,25 @@ def build_ranking_video(title: str, entries: list[dict], output_path: str) -> No
             duration = clip.duration
             end_time = start_time + duration
 
-            # Fit the clip inside the stage, preserving aspect ratio.
-            scale = min(stage_width / clip.w, stage_height / clip.h)
-            fitted = clip.resized(scale)
-            x = SIDEBAR_WIDTH + (stage_width - fitted.w) / 2
+            # Scale the clip to the full canvas width and centre it
+            # vertically in the area below the header (overflow is
+            # cropped by the canvas / hidden behind the header bar).
+            fitted = clip.resized(width=VIDEO_WIDTH)
             y = HEADER_HEIGHT + (stage_height - fitted.h) / 2
             video_layers.append(
-                fitted.with_start(start_time).with_position((x, y))
+                fitted.with_start(start_time).with_position((0, y))
             )
 
-            # Sidebar entry: rendered once, reused for both opacity states.
+            # List entry: rendered once, reused for both opacity states.
             row_index = SIDEBAR_ORDER.index(entry["rank"])
             row_y = HEADER_HEIGHT + ROW_TOP_PADDING + row_index * ROW_HEIGHT
             label = TextClip(
                 font=font,
-                text=f"{entry['rank']:02d}  {entry['label']}",
+                text=f"{entry['rank']}. {entry['label']}",
                 font_size=LABEL_FONT_SIZE,
                 color=TEXT_COLOR,
+                stroke_color=LABEL_STROKE_COLOR,
+                stroke_width=LABEL_STROKE_WIDTH,
                 margin=(TEXT_MARGIN, TEXT_MARGIN),
             ).with_position((ROW_LEFT_PADDING - TEXT_MARGIN, row_y - TEXT_MARGIN))
 
@@ -168,7 +177,7 @@ def build_ranking_video(title: str, entries: list[dict], output_path: str) -> No
             start_time = end_time
 
         final = CompositeVideoClip(
-            [background, title_clip, *label_layers, *video_layers],
+            [background, *video_layers, header_bar, title_clip, *label_layers],
             size=(VIDEO_WIDTH, VIDEO_HEIGHT),
         ).with_duration(total_duration)
 
